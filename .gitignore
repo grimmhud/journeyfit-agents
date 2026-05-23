@@ -12,7 +12,7 @@ __pycache__/
 .env.production.local
 .env.development
 .env.test
-export*
+/export*
 __pycache__/model_tools.cpython-310.pyc
 __pycache__/web_tools.cpython-310.pyc
 logs/
@@ -44,6 +44,51 @@ __pycache__/
 hermes_agent.egg-info/
 wandb/
 testlogs
+
+# Project-scoped Hermes home. Keep durable project knowledge in git while
+# excluding secrets, machine-local config, logs, databases, locks, and caches.
+.hermes/.env
+.hermes/.env.*
+.hermes/auth.json
+.hermes/auth.json.*
+.hermes/auth.lock
+.hermes/config.yaml
+.hermes/config.yaml.*
+.hermes/logs/
+.hermes/tmp/
+.hermes/cache/
+.hermes/sessions/
+.hermes/cron/
+.hermes/pastes/
+.hermes/bin/
+.hermes/home/
+.hermes/.hermes_history
+.hermes/.clean_shutdown
+.hermes/.update_check
+.hermes/.skills_prompt_snapshot.json
+.hermes/gateway_state.json
+.hermes/channel_directory.json
+.hermes/models_dev_cache.json
+.hermes/interrupt_debug.log
+.hermes/**/*.db
+.hermes/**/*.db-shm
+.hermes/**/*.db-wal
+.hermes/*.db
+.hermes/*.db-shm
+.hermes/*.db-wal
+.hermes/**/*.sqlite
+.hermes/**/*.log
+.hermes/**/*.lock
+.hermes/skills/.hub/
+.hermes/skills/.usage.json
+.hermes/skills/.usage.json.lock
+.hermes/skills/.curator_state
+.hermes/skills/.curator_backups/
+.hermes/skills/.bundled_manifest
+.hermes/skills/.archive/
+.hermes/plugins/hermes-achievements/scan_checkpoint.json
+.hermes/plugins/hermes-achievements/scan_snapshot.json
+.hermes/plugins/hermes-achievements/state.json
 
 # CLI config (may contain sensitive SSH paths)
 cli-config.yaml

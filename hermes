@@ -7,5 +7,11 @@ subcommands such as `gateway`, `cron`, and `doctor`.
 """
 
 if __name__ == "__main__":
+    import os
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parent
+    os.environ["HERMES_HOME"] = str(repo_root / ".hermes")
+
     from hermes_cli.main import main
     main()
