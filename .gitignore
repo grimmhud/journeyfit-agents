@@ -44,6 +44,7 @@ __pycache__/
 hermes_agent.egg-info/
 wandb/
 testlogs
+app.log
 
 # Project-scoped Hermes home. Keep durable project knowledge in git while
 # excluding secrets, machine-local config, logs, databases, locks, and caches.
@@ -70,6 +71,38 @@ testlogs
 .hermes/channel_directory.json
 .hermes/models_dev_cache.json
 .hermes/interrupt_debug.log
+.hermes/active_profile
+.hermes/profiles/*/auth.json
+.hermes/profiles/*/auth.json.*
+.hermes/profiles/*/auth.lock
+.hermes/profiles/*/.env
+.hermes/profiles/*/.env.*
+.hermes/profiles/*/config.yaml
+.hermes/profiles/*/config.yaml.*
+.hermes/profiles/*/config.yaml.bak.*
+.hermes/profiles/*/models_dev_cache.json
+.hermes/profiles/*/.hermes_history
+.hermes/profiles/*/.skills_prompt_snapshot.json
+.hermes/profiles/*/.update_check
+.hermes/profiles/*/channel_directory.json
+.hermes/profiles/*/gateway.pid
+.hermes/profiles/*/gateway_state.json
+.hermes/profiles/*/context_length_cache.yaml
+.hermes/profiles/*/bin/
+.hermes/profiles/*/logs/
+.hermes/profiles/*/tmp/
+.hermes/profiles/*/cache/
+.hermes/profiles/*/sessions/
+.hermes/profiles/*/cron/
+.hermes/profiles/*/pastes/
+.hermes/profiles/*/*.bak.*
+.hermes/profiles/*/skills/.hub/
+.hermes/profiles/*/skills/.usage.json
+.hermes/profiles/*/skills/.usage.json.lock
+.hermes/profiles/*/skills/.curator_state
+.hermes/profiles/*/skills/.curator_backups/
+.hermes/profiles/*/skills/.bundled_manifest
+.hermes/profiles/*/skills/.archive/
 .hermes/**/*.db
 .hermes/**/*.db-shm
 .hermes/**/*.db-wal

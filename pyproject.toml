@@ -266,3 +266,7 @@ select = ["PLW1514"]
 "skills/**" = ["PLW1514"]
 "optional-skills/**" = ["PLW1514"]
 "plugins/**" = ["PLW1514"]
+# Installed Hermes profile skill copies include third-party setup helpers.
+# Avoid touching setup.py in PRs because the supply-chain scanner treats any
+# setup.py diff as an install-hook risk.
+".hermes/**/setup.py" = ["PLW1514"]

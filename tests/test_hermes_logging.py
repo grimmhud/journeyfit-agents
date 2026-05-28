@@ -4,6 +4,7 @@ import logging
 import os
 import stat
 import threading
+from datetime import date
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from unittest.mock import patch
@@ -162,6 +163,31 @@ class TestSetupLogging:
         assert agent_log.exists()
         content = agent_log.read_text()
         assert "test message for agent.log" in content
+
+    def test_daily_rollover_archives_the_previous_day(self, hermes_home):
+        hermes_logging.setup_logging(hermes_home=hermes_home)
+
+        test_logger = logging.getLogger("test_hermes_logging.rollover_test")
+        test_logger.info("before rollover")
+
+        root = logging.getLogger()
+        handler = next(
+            h for h in root.handlers
+            if isinstance(h, RotatingFileHandler)
+            and "agent.log" in getattr(h, "baseFilename", "")
+        )
+        handler.doRollover()
+        test_logger.info("after rollover")
+
+        for h in root.handlers:
+            h.flush()
+
+        today = date.today().isoformat()
+        archived = hermes_home / "logs" / f"agent.log.{today}"
+        current = hermes_home / "logs" / "agent.log"
+        assert archived.exists()
+        assert "before rollover" in archived.read_text()
+        assert "after rollover" in current.read_text()
 
     def test_warnings_appear_in_both_logs(self, hermes_home):
         hermes_logging.setup_logging(hermes_home=hermes_home)
