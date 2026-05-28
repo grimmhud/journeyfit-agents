@@ -2,15 +2,16 @@
 
 Provides a single ``setup_logging()`` entry point that both the CLI and
 gateway call early in their startup path.  All log files live under
-``~/.hermes/logs/`` (profile-aware via ``get_hermes_home()``).
+``~/.hermes/logs/`` (profile-aware via ``get_hermes_home()``) and rotate
+daily so each day gets its own archived log file.
 
 Log files produced:
     agent.log   — INFO+, all agent/tool/session activity (the main log)
     errors.log  — WARNING+, errors and warnings only (quick triage)
     gateway.log — INFO+, gateway-only events (created when mode="gateway")
 
-All files use ``RotatingFileHandler`` with ``RedactingFormatter`` so
-secrets are never written to disk.
+All files use a date-rotating ``RotatingFileHandler`` with
+``RedactingFormatter`` so secrets are never written to disk.
 
 Component separation:
     gateway.log only receives records from ``gateway.*`` loggers —
@@ -26,6 +27,7 @@ Session context:
 import logging
 import os
 import threading
+from datetime import date
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional, Sequence
@@ -296,19 +298,25 @@ def setup_verbose_logging() -> None:
 # ---------------------------------------------------------------------------
 
 class _ManagedRotatingFileHandler(RotatingFileHandler):
-    """RotatingFileHandler that ensures group-writable perms in managed mode.
+    """Date-rotating file handler with managed-perm support.
 
     In managed mode (NixOS), the stateDir uses setgid (2770) so new files
     inherit the hermes group. However, both _open() (initial creation) and
     doRollover() create files via open(), which uses the process umask —
     typically 0022, producing 0644. This subclass applies chmod 0660 after
     both operations so the gateway and interactive users can share log files.
+
+    The rollover policy is date-based instead of size-based: the active
+    ``agent.log`` / ``errors.log`` / ``gateway.log`` file stays current for
+    the day, then gets archived as ``<name>.YYYY-MM-DD`` when the date
+    changes. ``backupCount`` still controls how many archived days are kept.
     """
 
     def __init__(self, *args, **kwargs):
         from hermes_cli.config import is_managed
         self._managed = is_managed()
         super().__init__(*args, **kwargs)
+        self._current_log_day = date.today().isoformat()
 
     def _chmod_if_managed(self):
         if self._managed:
@@ -322,9 +330,52 @@ class _ManagedRotatingFileHandler(RotatingFileHandler):
         self._chmod_if_managed()
         return stream
 
+    def shouldRollover(self, record):  # noqa: N802 - logging API name
+        return date.today().isoformat() != self._current_log_day
+
+    def _archive_path(self, day: str) -> Path:
+        return Path(f"{self.baseFilename}.{day}")
+
+    def _cleanup_archives(self) -> None:
+        if self.backupCount <= 0:
+            return
+        base = Path(self.baseFilename)
+        candidates = sorted(
+            (
+                path for path in base.parent.glob(f"{base.name}.*")
+                if path.name != base.name
+            ),
+            reverse=True,
+        )
+        for old_path in candidates[self.backupCount:]:
+            try:
+                old_path.unlink()
+            except OSError:
+                pass
+
     def doRollover(self):
-        super().doRollover()
-        self._chmod_if_managed()
+        try:
+            if self.stream:
+                self.stream.close()
+                self.stream = None
+            current_path = Path(self.baseFilename)
+            if current_path.exists():
+                archive_path = self._archive_path(self._current_log_day)
+                try:
+                    if archive_path.exists():
+                        archive_path.unlink()
+                except OSError:
+                    pass
+                try:
+                    current_path.rename(archive_path)
+                except OSError:
+                    pass
+            self._current_log_day = date.today().isoformat()
+            self.mode = "a"
+            self.stream = self._open()
+            self._cleanup_archives()
+        finally:
+            self._chmod_if_managed()
 
 
 def _add_rotating_handler(

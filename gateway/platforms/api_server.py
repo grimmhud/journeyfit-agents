@@ -452,7 +452,11 @@ class ResponseStore:
 
 _CORS_HEADERS = {
     "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type, Idempotency-Key",
+    "Access-Control-Allow-Headers": (
+        "Authorization, Content-Type, Idempotency-Key, "
+        "X-Request-Id, X-Hermes-Client, X-Hermes-Session-Id, X-Hermes-Session-Key, "
+        "OpenAI-Beta"
+    ),
 }
 
 
@@ -852,6 +856,7 @@ class APIServerAdapter(BasePlatformAdapter):
         self,
         ephemeral_system_prompt: Optional[str] = None,
         session_id: Optional[str] = None,
+        request_id: Optional[str] = None,
         stream_delta_callback=None,
         tool_progress_callback=None,
         tool_start_callback=None,
@@ -880,6 +885,7 @@ class APIServerAdapter(BasePlatformAdapter):
         runtime_kwargs = _resolve_runtime_agent_kwargs()
         reasoning_config = GatewayRunner._load_reasoning_config()
         model = _resolve_gateway_model()
+        log_prefix = f"[api_server:{request_id or session_id or 'unknown'}]"
 
         user_config = _load_gateway_config()
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
@@ -889,6 +895,15 @@ class APIServerAdapter(BasePlatformAdapter):
         # Load fallback provider chain so the API server platform has the
         # same fallback behaviour as Telegram/Discord/Slack (fixes #4954).
         fallback_model = GatewayRunner._load_fallback_model()
+        logger.info(
+            "%s creating agent model=%s toolsets=%s max_iterations=%d has_ephemeral_prompt=%s gateway_session_key=%s",
+            log_prefix,
+            model,
+            ",".join(enabled_toolsets) or "-",
+            max_iterations,
+            bool(ephemeral_system_prompt),
+            gateway_session_key or "-",
+        )
 
         agent = AIAgent(
             model=model,
@@ -908,6 +923,12 @@ class APIServerAdapter(BasePlatformAdapter):
             fallback_model=fallback_model,
             reasoning_config=reasoning_config,
             gateway_session_key=gateway_session_key,
+        )
+        logger.info(
+            "%s agent created valid_tools=%d disabled_toolsets=%s",
+            log_prefix,
+            len(getattr(agent, "valid_tool_names", []) or []),
+            ",".join(getattr(agent, "disabled_toolsets", []) or []) or "-",
         )
         return agent
 
@@ -1022,6 +1043,11 @@ class APIServerAdapter(BasePlatformAdapter):
 
     async def _handle_chat_completions(self, request: "web.Request") -> "web.Response":
         """POST /v1/chat/completions — OpenAI Chat Completions format."""
+        request_id = (request.headers.get("X-Request-Id") or "").strip()
+        if not request_id:
+            request_id = f"req_{uuid.uuid4().hex[:16]}"
+        request_started_at = time.monotonic()
+        log_prefix = f"[api_server:{request_id}]"
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
@@ -1030,16 +1056,26 @@ class APIServerAdapter(BasePlatformAdapter):
         try:
             body = await request.json()
         except (json.JSONDecodeError, Exception):
+            logger.warning("%s invalid JSON body", log_prefix)
             return web.json_response(_openai_error("Invalid JSON in request body"), status=400)
 
         messages = body.get("messages")
         if not messages or not isinstance(messages, list):
+            logger.warning("%s missing or invalid messages field", log_prefix)
             return web.json_response(
                 {"error": {"message": "Missing or invalid 'messages' field", "type": "invalid_request_error"}},
                 status=400,
             )
 
         stream = _coerce_request_bool(body.get("stream"), default=False)
+        model_name = body.get("model", self._model_name)
+        logger.info(
+            "%s chat.completions start stream=%s model=%s message_count=%d",
+            log_prefix,
+            stream,
+            model_name,
+            len(messages),
+        )
 
         # Extract system message (becomes ephemeral system prompt layered ON TOP of core)
         system_prompt = None
@@ -1071,6 +1107,7 @@ class APIServerAdapter(BasePlatformAdapter):
             history = conversation_messages[:-1]
 
         if not _content_has_visible_payload(user_message):
+            logger.warning("%s no visible user payload after normalization", log_prefix)
             return web.json_response(
                 {"error": {"message": "No user message found in messages", "type": "invalid_request_error"}},
                 status=400,
@@ -1083,6 +1120,7 @@ class APIServerAdapter(BasePlatformAdapter):
         # transcript (i.e. /new semantics).  See _parse_session_key_header.
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
+            logger.warning("%s invalid gateway session key", log_prefix)
             return key_err
 
         # Allow caller to continue an existing session by passing X-Hermes-Session-Id.
@@ -1096,9 +1134,10 @@ class APIServerAdapter(BasePlatformAdapter):
         if provided_session_id:
             if not self._api_key:
                 logger.warning(
-                    "Session continuation via X-Hermes-Session-Id rejected: "
+                    "%s session continuation via X-Hermes-Session-Id rejected: "
                     "no API key configured.  Set API_SERVER_KEY to enable "
-                    "session continuity."
+                    "session continuity.",
+                    log_prefix,
                 )
                 return web.json_response(
                     _openai_error(
@@ -1109,17 +1148,26 @@ class APIServerAdapter(BasePlatformAdapter):
                 )
             # Sanitize: reject control characters that could enable header injection.
             if re.search(r'[\r\n\x00]', provided_session_id):
+                logger.warning("%s invalid session id header rejected", log_prefix)
                 return web.json_response(
                     {"error": {"message": "Invalid session ID", "type": "invalid_request_error"}},
                     status=400,
                 )
             session_id = provided_session_id
             try:
+                session_load_started_at = time.monotonic()
                 db = self._ensure_session_db()
                 if db is not None:
                     history = db.get_messages_as_conversation(session_id)
+                logger.info(
+                    "%s session history loaded session_id=%s history_messages=%d elapsed_ms=%d",
+                    log_prefix,
+                    session_id,
+                    len(history),
+                    round((time.monotonic() - session_load_started_at) * 1000),
+                )
             except Exception as e:
-                logger.warning("Failed to load session history for %s: %s", session_id, e)
+                logger.warning("%s failed to load session history for %s: %s", log_prefix, session_id, e)
                 history = []
         else:
             # Derive a stable session ID from the conversation fingerprint so
@@ -1133,9 +1181,14 @@ class APIServerAdapter(BasePlatformAdapter):
                     break
             session_id = _derive_chat_session_id(system_prompt, first_user)
             # history already set from request body above
+            logger.info(
+                "%s derived session_id=%s history_messages=%d",
+                log_prefix,
+                session_id,
+                len(history),
+            )
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
-        model_name = body.get("model", self._model_name)
         created = int(time.time())
 
         if stream:
@@ -1215,12 +1268,19 @@ class APIServerAdapter(BasePlatformAdapter):
                 conversation_history=history,
                 ephemeral_system_prompt=system_prompt,
                 session_id=session_id,
+                request_id=request_id,
                 stream_delta_callback=_on_delta,
                 tool_start_callback=_on_tool_start,
                 tool_complete_callback=_on_tool_complete,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
             ))
+            logger.info(
+                "%s streaming agent task scheduled session_id=%s history_messages=%d",
+                log_prefix,
+                session_id,
+                len(history),
+            )
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
             agent_task.add_done_callback(lambda _fut: _stream_q.put(None))
@@ -1228,6 +1288,7 @@ class APIServerAdapter(BasePlatformAdapter):
             return await self._write_sse_chat_completion(
                 request, completion_id, model_name, created, _stream_q,
                 agent_task, agent_ref, session_id=session_id,
+                request_id=request_id,
                 gateway_session_key=gateway_session_key,
             )
 
@@ -1238,6 +1299,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 conversation_history=history,
                 ephemeral_system_prompt=system_prompt,
                 session_id=session_id,
+                request_id=request_id,
                 gateway_session_key=gateway_session_key,
             )
 
@@ -1247,7 +1309,7 @@ class APIServerAdapter(BasePlatformAdapter):
             try:
                 result, usage = await _idem_cache.get_or_set(idempotency_key, fp, _compute_completion)
             except Exception as e:
-                logger.error("Error running agent for chat completions: %s", e, exc_info=True)
+                logger.error("%s error running agent for chat completions: %s", log_prefix, e, exc_info=True)
                 return web.json_response(
                     _openai_error(f"Internal server error: {e}", err_type="server_error"),
                     status=500,
@@ -1256,7 +1318,7 @@ class APIServerAdapter(BasePlatformAdapter):
             try:
                 result, usage = await _compute_completion()
             except Exception as e:
-                logger.error("Error running agent for chat completions: %s", e, exc_info=True)
+                logger.error("%s error running agent for chat completions: %s", log_prefix, e, exc_info=True)
                 return web.json_response(
                     _openai_error(f"Internal server error: {e}", err_type="server_error"),
                     status=500,
@@ -1279,6 +1341,7 @@ class APIServerAdapter(BasePlatformAdapter):
             finish_reason = "stop"
 
         response_headers = {
+            "X-Request-Id": request_id,
             "X-Hermes-Session-Id": result.get("session_id", session_id),
         }
         if gateway_session_key:
@@ -1339,11 +1402,23 @@ class APIServerAdapter(BasePlatformAdapter):
             if err_msg:
                 response_headers["X-Hermes-Error"] = err_msg[:200]
 
+        logger.info(
+            "%s chat.completions done completed=%s partial=%s failed=%s finish_reason=%s elapsed_ms=%d prompt_tokens=%d completion_tokens=%d",
+            log_prefix,
+            completed,
+            is_partial,
+            is_failed,
+            finish_reason,
+            round((time.monotonic() - request_started_at) * 1000),
+            usage.get("input_tokens", 0),
+            usage.get("output_tokens", 0),
+        )
         return web.json_response(response_data, headers=response_headers)
 
     async def _write_sse_chat_completion(
         self, request: "web.Request", completion_id: str, model: str,
         created: int, stream_q, agent_task, agent_ref=None, session_id: str = None,
+        request_id: str = None,
         gateway_session_key: str = None,
     ) -> "web.StreamResponse":
         """Write real streaming SSE from agent's stream_delta_callback queue.
@@ -1367,6 +1442,8 @@ class APIServerAdapter(BasePlatformAdapter):
             sse_headers.update(cors)
         if session_id:
             sse_headers["X-Hermes-Session-Id"] = session_id
+        if request_id:
+            sse_headers["X-Request-Id"] = request_id
         if gateway_session_key:
             sse_headers["X-Hermes-Session-Key"] = gateway_session_key
         response = web.StreamResponse(status=200, headers=sse_headers)
@@ -2737,6 +2814,7 @@ class APIServerAdapter(BasePlatformAdapter):
         conversation_history: List[Dict[str, str]],
         ephemeral_system_prompt: Optional[str] = None,
         session_id: Optional[str] = None,
+        request_id: Optional[str] = None,
         stream_delta_callback=None,
         tool_progress_callback=None,
         tool_start_callback=None,
@@ -2756,24 +2834,48 @@ class APIServerAdapter(BasePlatformAdapter):
         another thread to stop in-progress LLM calls.
         """
         loop = asyncio.get_running_loop()
+        run_started_at = time.monotonic()
+        log_prefix = f"[api_server:{request_id or session_id or 'unknown'}]"
 
         def _run():
+            agent_started_at = time.monotonic()
+            logger.info(
+                "%s agent run start session_id=%s history_messages=%d has_ephemeral_prompt=%s gateway_session_key=%s",
+                log_prefix,
+                session_id or "-",
+                len(conversation_history),
+                bool(ephemeral_system_prompt),
+                gateway_session_key or "-",
+            )
             agent = self._create_agent(
                 ephemeral_system_prompt=ephemeral_system_prompt,
                 session_id=session_id,
+                request_id=request_id,
                 stream_delta_callback=stream_delta_callback,
                 tool_progress_callback=tool_progress_callback,
                 tool_start_callback=tool_start_callback,
                 tool_complete_callback=tool_complete_callback,
                 gateway_session_key=gateway_session_key,
             )
+            logger.info(
+                "%s agent created elapsed_ms=%d toolsets=%s",
+                log_prefix,
+                round((time.monotonic() - agent_started_at) * 1000),
+                ",".join(getattr(agent, "enabled_toolsets", []) or []) or "-",
+            )
             if agent_ref is not None:
                 agent_ref[0] = agent
             effective_task_id = session_id or str(uuid.uuid4())
+            conversation_started_at = time.monotonic()
             result = agent.run_conversation(
                 user_message=user_message,
                 conversation_history=conversation_history,
                 task_id=effective_task_id,
+            )
+            logger.info(
+                "%s agent conversation complete elapsed_ms=%d",
+                log_prefix,
+                round((time.monotonic() - conversation_started_at) * 1000),
             )
             usage = {
                 "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
@@ -2786,6 +2888,14 @@ class APIServerAdapter(BasePlatformAdapter):
             _eff_sid = getattr(agent, "session_id", session_id)
             if isinstance(_eff_sid, str) and _eff_sid:
                 result["session_id"] = _eff_sid
+            logger.info(
+                "%s agent run done total_elapsed_ms=%d input_tokens=%d output_tokens=%d total_tokens=%d",
+                log_prefix,
+                round((time.monotonic() - run_started_at) * 1000),
+                usage["input_tokens"],
+                usage["output_tokens"],
+                usage["total_tokens"],
+            )
             return result, usage
 
         return await loop.run_in_executor(None, _run)

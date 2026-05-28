@@ -5,6 +5,7 @@ without risk of circular imports.
 """
 
 import os
+import sys
 import sysconfig
 from contextvars import ContextVar, Token
 from pathlib import Path
@@ -15,6 +16,11 @@ _UNSET = object()
 _HERMES_HOME_OVERRIDE: ContextVar[str | object] = ContextVar(
     "_HERMES_HOME_OVERRIDE", default=_UNSET
 )
+
+
+def _repo_hermes_home() -> Path:
+    """Return the repository-local .hermes directory."""
+    return Path(__file__).resolve().parent / ".hermes"
 
 
 def set_hermes_home_override(path: str | Path | None) -> Token:
@@ -41,20 +47,11 @@ def get_hermes_home_override() -> str | None:
 
 
 def get_hermes_home() -> Path:
-    """Return the Hermes home directory (default: ~/.hermes).
+    """Return the active Hermes home directory.
 
-    Reads HERMES_HOME env var, falls back to ~/.hermes.
-    This is the single source of truth — all other copies should import this.
-
-    When ``HERMES_HOME`` is unset but an ``active_profile`` file indicates
-    a non-default profile is active, logs a loud one-shot warning to
-    ``errors.log`` so cross-profile data corruption is diagnosable instead
-    of silent.  Behavior is unchanged otherwise — we still return
-    ``~/.hermes`` — because raising here would brick 30+ module-level
-    callers that import this at load time.  Subprocess spawners are
-    expected to propagate ``HERMES_HOME`` explicitly (see the systemd
-    template in ``hermes_cli/gateway.py`` and the kanban dispatcher in
-    ``hermes_cli/kanban_db.py``).  See https://github.com/NousResearch/hermes-agent/issues/18594.
+    ``HERMES_HOME`` remains authoritative. When a checkout-local
+    ``.hermes/active_profile`` exists, use that repository-scoped profile.
+    Otherwise preserve the historical fallback to ``~/.hermes``.
     """
     override = get_hermes_home_override()
     if override:
@@ -64,80 +61,63 @@ def get_hermes_home() -> Path:
     if val:
         return Path(val)
 
-    # Guard: if a non-default profile is sticky-active, warn once that
-    # the fallback to the default profile is almost certainly wrong.
-    global _profile_fallback_warned
-    if not _profile_fallback_warned:
-        try:
-            # Inline the default-root resolution from get_default_hermes_root()
-            # to stay import-safe (this function is called from module scope
-            # in 30+ files; we cannot afford to trigger logging setup here).
-            active_path = (Path.home() / ".hermes" / "active_profile")
-            active = active_path.read_text().strip() if active_path.exists() else ""
-        except (UnicodeDecodeError, OSError):
-            active = ""
-        if active and active != "default":
-            _profile_fallback_warned = True
-            # Write directly to stderr.  We intentionally do NOT route this
-            # through ``logging`` because (a) this function is called at
-            # module-import time from 30+ sites, often before logging is
-            # configured, and (b) root-logger propagation would double-emit
-            # on consoles where a StreamHandler is already attached.
-            import sys
-            msg = (
-                f"[HERMES_HOME fallback] HERMES_HOME is unset but active "
-                f"profile is {active!r}. Falling back to ~/.hermes, which "
-                f"is the DEFAULT profile — not {active!r}. Any data this "
-                f"process writes will land in the wrong profile. The "
-                f"subprocess spawner should pass HERMES_HOME explicitly "
-                f"(see issue #18594)."
-            )
-            try:
-                sys.stderr.write(msg + "\n")
-                sys.stderr.flush()
-            except Exception:
-                pass
+    repo_root = _repo_hermes_home()
+    active_path = repo_root / "active_profile"
+    try:
+        active = active_path.read_text(encoding="utf-8").strip() if active_path.exists() else ""
+    except (UnicodeDecodeError, OSError):
+        active = ""
 
-    return Path.home() / ".hermes"
+    if active and active != "default":
+        profile_home = repo_root / "profiles" / active
+        if profile_home.exists():
+            return profile_home
+
+    fallback_home = Path.home() / ".hermes"
+    fallback_active_path = fallback_home / "active_profile"
+    try:
+        fallback_active = (
+            fallback_active_path.read_text(encoding="utf-8").strip()
+            if fallback_active_path.exists()
+            else ""
+        )
+    except (UnicodeDecodeError, OSError):
+        fallback_active = ""
+
+    if fallback_active and fallback_active != "default":
+        global _profile_fallback_warned
+        if not _profile_fallback_warned:
+            print(
+                "HERMES_HOME fallback: active_profile is "
+                f"'{fallback_active}' but HERMES_HOME is unset; "
+                f"using {fallback_home}. See #18594.",
+                file=sys.stderr,
+            )
+            _profile_fallback_warned = True
+
+    return fallback_home
 
 
 def get_default_hermes_root() -> Path:
     """Return the root Hermes directory for profile-level operations.
 
-    In standard deployments this is ``~/.hermes``.
-
-    In Docker or custom deployments where ``HERMES_HOME`` points outside
-    ``~/.hermes`` (e.g. ``/opt/data``), returns ``HERMES_HOME`` directly
-    — that IS the root.
-
-    In profile mode where ``HERMES_HOME`` is ``<root>/profiles/<name>``,
-    returns ``<root>`` so that ``profile list`` can see all profiles.
-    Works both for standard (``~/.hermes/profiles/coder``) and Docker
-    (``/opt/data/profiles/coder``) layouts.
-
-    Import-safe — no dependencies beyond stdlib.
+    ``HERMES_HOME`` explicitly points at a custom root or at one of that
+    root's profiles. If a checkout-local active profile exists, use the
+    checkout-local root; otherwise preserve the historical ``~/.hermes``
+    default.
     """
-    native_home = Path.home() / ".hermes"
-    env_home = os.environ.get("HERMES_HOME", "")
-    if not env_home:
-        return native_home
-    env_path = Path(env_home)
-    try:
-        env_path.resolve().relative_to(native_home.resolve())
-        # HERMES_HOME is under ~/.hermes (normal or profile mode)
-        return native_home
-    except ValueError:
-        pass
+    env_home = os.environ.get("HERMES_HOME", "").strip()
+    if env_home:
+        env_path = Path(env_home)
+        if env_path.parent.name == "profiles":
+            return env_path.parent.parent
+        return env_path
 
-    # Docker / custom deployment.
-    # Check if this is a profile path: <root>/profiles/<name>
-    # If the immediate parent dir is named "profiles", the root is
-    # the grandparent — this covers Docker profiles correctly.
-    if env_path.parent.name == "profiles":
-        return env_path.parent.parent
+    repo_root = _repo_hermes_home()
+    if (repo_root / "active_profile").exists():
+        return repo_root
 
-    # Not a profile path — HERMES_HOME itself is the root
-    return env_path
+    return Path.home() / ".hermes"
 
 
 def _get_packaged_data_dir(name: str) -> Path | None:
@@ -272,9 +252,7 @@ def get_subprocess_home() -> str | None:
     Activation is directory-based: if the ``home/`` subdirectory doesn't
     exist, returns ``None`` and behavior is unchanged.
     """
-    hermes_home = get_hermes_home_override() or os.getenv("HERMES_HOME")
-    if not hermes_home:
-        return None
+    hermes_home = str(get_hermes_home())
     profile_home = os.path.join(hermes_home, "home")
     if os.path.isdir(profile_home):
         return profile_home

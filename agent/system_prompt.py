@@ -24,7 +24,9 @@ Pure helpers that read the agent's state.  AIAgent keeps thin forwarders.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import time
 from typing import Any, Dict, List, Optional
 
 from agent.prompt_builder import (
@@ -40,6 +42,8 @@ from agent.prompt_builder import (
     TOOL_USE_ENFORCEMENT_GUIDANCE,
     TOOL_USE_ENFORCEMENT_MODELS,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _ra():
@@ -75,6 +79,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     session — that's the only way to keep upstream prompt caches
     warm across turns.
     """
+    started_at = time.monotonic()
     # Local import to avoid pulling model_tools at module load.  Tests
     # patch ``run_agent.get_toolset_for_tool`` and similar helpers, so
     # we resolve through ``_ra()`` to honor those patches.
@@ -277,11 +282,21 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         timestamp_line += f"\nProvider: {agent.provider}"
     volatile_parts.append(timestamp_line)
 
-    return {
+    parts = {
         "stable":   "\n\n".join(p.strip() for p in stable_parts   if p and p.strip()),
         "context":  "\n\n".join(p.strip() for p in context_parts  if p and p.strip()),
         "volatile": "\n\n".join(p.strip() for p in volatile_parts if p and p.strip()),
     }
+    logger.info(
+        "System prompt parts built stable_chars=%d context_chars=%d volatile_chars=%d elapsed_ms=%d has_skills_prompt=%s has_context_files=%s",
+        len(parts["stable"]),
+        len(parts["context"]),
+        len(parts["volatile"]),
+        round((time.monotonic() - started_at) * 1000),
+        bool(skills_prompt),
+        bool(context_parts),
+    )
+    return parts
 
 
 def build_system_prompt(agent: Any, system_message: Optional[str] = None) -> str:

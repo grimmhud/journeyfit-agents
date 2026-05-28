@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -55,6 +56,7 @@ def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tu
     raw_identifier = (skill_identifier or "").strip()
     if not raw_identifier:
         return None
+    started_at = time.monotonic()
 
     try:
         from tools.skills_tool import SKILLS_DIR, skill_view
@@ -93,10 +95,22 @@ def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tu
         loaded_skill = json.loads(
             skill_view(normalized, task_id=task_id, preprocess=False)
         )
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "Skill payload load failed identifier=%s elapsed_ms=%d error=%s",
+            raw_identifier,
+            round((time.monotonic() - started_at) * 1000),
+            exc,
+        )
         return None
 
     if not loaded_skill.get("success"):
+        logger.warning(
+            "Skill payload reported failure identifier=%s normalized=%s elapsed_ms=%d",
+            raw_identifier,
+            normalized,
+            round((time.monotonic() - started_at) * 1000),
+        )
         return None
 
     skill_name = str(loaded_skill.get("name") or normalized)
@@ -114,6 +128,14 @@ def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tu
             skill_dir = SKILLS_DIR / Path(skill_path).parent
         except Exception:
             skill_dir = None
+
+    logger.info(
+        "Skill payload loaded identifier=%s normalized=%s path=%s elapsed_ms=%d",
+        raw_identifier,
+        normalized,
+        skill_path or "-",
+        round((time.monotonic() - started_at) * 1000),
+    )
 
     return loaded_skill, skill_dir, skill_name
 

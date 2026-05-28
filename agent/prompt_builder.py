@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import threading
+import time
 from collections import OrderedDict
 from pathlib import Path
 
@@ -1014,6 +1015,7 @@ def build_skills_system_prompt(
     """
     skills_dir = get_skills_dir()
     external_dirs = get_all_skills_dirs()[1:]  # skip local (index 0)
+    started_at = time.monotonic()
 
     if not skills_dir.exists() and not external_dirs:
         return ""
@@ -1040,6 +1042,12 @@ def build_skills_system_prompt(
         cached = _SKILLS_PROMPT_CACHE.get(cache_key)
         if cached is not None:
             _SKILLS_PROMPT_CACHE.move_to_end(cache_key)
+            logger.debug(
+                "Skills prompt cache hit tools=%d toolsets=%d elapsed_ms=%d",
+                len(available_tools or set()),
+                len(available_toolsets or set()),
+                round((time.monotonic() - started_at) * 1000),
+            )
             return cached
 
     # ── Layer 2: disk snapshot ────────────────────────────────────────
@@ -1225,6 +1233,16 @@ def build_skills_system_prompt(
         while len(_SKILLS_PROMPT_CACHE) > _SKILLS_PROMPT_CACHE_MAX:
             _SKILLS_PROMPT_CACHE.popitem(last=False)
 
+    total_skills = sum(len(items) for items in skills_by_category.values())
+    logger.info(
+        "Skills prompt built source=%s tools=%d toolsets=%d categories=%d skills=%d elapsed_ms=%d",
+        "snapshot" if snapshot is not None else "filesystem",
+        len(available_tools or set()),
+        len(available_toolsets or set()),
+        len(skills_by_category),
+        total_skills,
+        round((time.monotonic() - started_at) * 1000),
+    )
     return result
 
 
