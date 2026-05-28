@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from plugins.journeyfit_orchestrator.schemas import JOURNEYFIT_ORCHESTRATE_SCHEMA
 from plugins.journeyfit_orchestrator.tools import (
+    passthrough_journeyfit_tool_result,
+    remember_journeyfit_tool_result,
     run_journeyfit_orchestration,
     run_journeyfit_slash_command,
 )
@@ -23,3 +25,6 @@ def register(ctx) -> None:
         description="Run the JourneyFit orchestration flow.",
         args_hint="<request>",
     )
+    if hasattr(ctx, "register_hook"):
+        ctx.register_hook("post_tool_call", remember_journeyfit_tool_result)
+        ctx.register_hook("transform_llm_output", passthrough_journeyfit_tool_result)

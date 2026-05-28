@@ -4,7 +4,8 @@ import { useMemo, useState, type ReactNode } from "react";
 // V0 API Schema Types
 // ============================================================
 
-type RangeMinMax = { min: number; max: number };
+type RangeValue = number | null;
+type RangeMinMax = { min: RangeValue; max: RangeValue };
 
 type NoticeAgent = "doctor" | "nutritionist" | "personal_trainer";
 type NoticeType = "warning" | "info" | "restriction";
@@ -44,8 +45,8 @@ type TrainingSession = {
 
 type Training = {
   status: PlanStatus;
-  split: string;
-  weekly_frequency: number;
+  split: string | null;
+  weekly_frequency: number | null;
   session_duration_minutes: RangeMinMax;
   sessions: TrainingSession[];
 };
@@ -71,8 +72,8 @@ type Nutrition = {
   meals_per_day: RangeMinMax;
   hydration_ml_per_kg: RangeMinMax;
   timing: {
-    pre_workout_window: string;
-    post_workout_window: string;
+    pre_workout_window: string | null;
+    post_workout_window: string | null;
   };
   meal_examples: MealExamples;
 };
@@ -118,6 +119,9 @@ type JourneyFitEnvelope = {
   mode?: ResponseMode;
   assistant_message?: string;
   user_facing_message?: string;
+  renderable_plan?: unknown;
+  follow_up_questions?: unknown;
+  task_results?: unknown;
   [key: string]: unknown;
 };
 
@@ -322,11 +326,27 @@ function extractJsonPayload(text: string): string {
   return trimmed;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseMaybeJson(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (!trimmed) return value;
+  try {
+    return JSON.parse(extractJsonPayload(trimmed));
+  } catch {
+    return value;
+  }
+}
+
 function parseJson(text: string): { data: JourneyFitPreviewPayload | null; error: string | null } {
   try {
     const raw = extractJsonPayload(text);
     const parsed = JSON.parse(raw) as JourneyFitPreviewPayload;
-    return { data: parsed, error: null };
+    const plan = extractV0Plan(parsed);
+    return { data: (plan ?? parsed) as JourneyFitPreviewPayload, error: null };
   } catch (error) {
     return { data: null, error: error instanceof Error ? error.message : "JSON inválido" };
   }
@@ -393,16 +413,47 @@ function formatFollowUpQuestions(value: unknown): string | null {
   return `\n\nPerguntas:\n${lines.map((line) => `- ${line}`).join("\n")}`;
 }
 
+function questionsFromEnvelope(record: Record<string, unknown>): FollowUpQuestion[] {
+  const direct = record.follow_up_questions;
+  const final = isRecord(record.task_results)
+    ? (record.task_results as Record<string, unknown>).final_answer
+    : null;
+  const nested = isRecord(final)
+    ? final.required_information ?? final.follow_up_questions ?? final.user_questions_needed
+    : null;
+  const raw = Array.isArray(direct) && direct.length > 0 ? direct : nested;
+  if (!Array.isArray(raw)) return [];
+
+  return raw
+    .map((item, index) => {
+      if (typeof item === "string") {
+        return { id: `q${index + 1}`, question: item, priority: "high" as const };
+      }
+      if (!isRecord(item)) return null;
+      const question = typeof item.question === "string" ? item.question.trim() : "";
+      if (!question) return null;
+      const priority = item.priority === "medium" ? "medium" : "high";
+      return { id: String(item.id ?? `q${index + 1}`), question, priority };
+    })
+    .filter((item): item is FollowUpQuestion => item !== null);
+}
+
 function resolveFromEnvelope(payload: unknown): string {
+  const parsedPayload = parseMaybeJson(payload);
+  if (parsedPayload !== payload) return resolveFromEnvelope(parsedPayload);
+
   if (typeof payload !== "string") {
     const envelope = payload as JourneyFitEnvelope | null;
     if (envelope && typeof envelope === "object") {
+      const record = envelope as Record<string, unknown>;
       const msg =
-        extractHumanMessageFromObject(envelope as Record<string, unknown>) ||
+        extractHumanMessageFromObject(record) ||
         envelope.assistant_message?.trim() ||
         envelope.user_facing_message?.trim();
       if (msg) {
-        const extra = formatFollowUpQuestions((envelope as Record<string, unknown>).follow_up_questions);
+        const extra =
+          formatFollowUpQuestions(record.follow_up_questions) ||
+          formatFollowUpQuestions(questionsFromEnvelope(record));
         return `${msg}${extra ?? ""}`;
       }
     }
@@ -442,38 +493,42 @@ function isV0Plan(value: unknown): value is JourneyFitPlanEnvelope {
   );
 }
 
-function extractV0PlanJson(payload: unknown): string | null {
-  // Direct v0 plan
-  if (isV0Plan(payload)) return JSON.stringify(payload, null, 2);
+function withEnvelopeQuestions(plan: JourneyFitPlanEnvelope, source: unknown): JourneyFitPlanEnvelope {
+  if (!isRecord(source) || plan.follow_up_questions?.length) return plan;
+  const questions = questionsFromEnvelope(source);
+  return questions.length ? { ...plan, follow_up_questions: questions } : plan;
+}
 
-  if (!payload || typeof payload !== "object") return null;
-  const record = payload as Record<string, unknown>;
+function extractV0Plan(payload: unknown, depth = 0): JourneyFitPlanEnvelope | null {
+  if (depth > 6) return null;
+  const parsedPayload = parseMaybeJson(payload);
+  if (parsedPayload !== payload) return extractV0Plan(parsedPayload, depth + 1);
 
-  // OpenAI chat completion wrapper: choices[0].message.content
-  const content = (record.choices as Array<{ message?: { content?: unknown } }>)?.[0]?.message?.content;
-  if (content !== undefined) {
-    if (isV0Plan(content)) return JSON.stringify(content, null, 2);
-    if (typeof content === "string") {
-      try {
-        const parsed = JSON.parse(extractJsonPayload(content));
-        if (isV0Plan(parsed)) return JSON.stringify(parsed, null, 2);
-      } catch { /* not a plan */ }
-    }
+  if (isV0Plan(payload)) return payload;
+  if (!isRecord(payload)) return null;
+
+  if ("renderable_plan" in payload) {
+    const plan = extractV0Plan(payload.renderable_plan, depth + 1);
+    if (plan) return withEnvelopeQuestions(plan, payload);
   }
 
-  // Generic envelope fields
+  const content = (payload.choices as Array<{ message?: { content?: unknown } }>)?.[0]?.message?.content;
+  if (content !== undefined) {
+    const plan = extractV0Plan(content, depth + 1);
+    if (plan) return plan;
+  }
+
   for (const key of ["json", "output", "result", "data"] as const) {
-    const candidate = record[key];
-    if (isV0Plan(candidate)) return JSON.stringify(candidate, null, 2);
-    if (typeof candidate === "string") {
-      try {
-        const parsed = JSON.parse(extractJsonPayload(candidate));
-        if (isV0Plan(parsed)) return JSON.stringify(parsed, null, 2);
-      } catch { /* not a plan */ }
-    }
+    const plan = extractV0Plan(payload[key], depth + 1);
+    if (plan) return plan;
   }
 
   return null;
+}
+
+function extractV0PlanJson(payload: unknown): string | null {
+  const plan = extractV0Plan(payload);
+  return plan ? JSON.stringify(plan, null, 2) : null;
 }
 
 // ============================================================
@@ -510,6 +565,22 @@ function NoticeCard({ notice }: { notice: Notice }) {
     <div className={`notice ${severityClass[notice.severity]}`}>
       <span className="notice__agent">{agentLabels[notice.agent]}</span>
       <p className="notice__message">{notice.message}</p>
+    </div>
+  );
+}
+
+function formatRange(range: RangeMinMax | null | undefined, unit = "") {
+  if (!range || range.min == null || range.max == null) return "A definir";
+  const suffix = unit ? ` ${unit}` : "";
+  if (range.min === range.max) return `${range.min}${suffix}`;
+  return `${range.min}–${range.max}${suffix}`;
+}
+
+function EmptyPanel({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div className="empty-panel">
+      <h3>{title}</h3>
+      <p>{children}</p>
     </div>
   );
 }
@@ -553,31 +624,39 @@ function MacroRow({ label, range, unit }: { label: string; range: RangeMinMax; u
   return (
     <div className="meal-row">
       <strong>{label}</strong>
-      <span>{range.min}–{range.max} {unit}</span>
+      <span>{formatRange(range, unit)}</span>
     </div>
   );
 }
 
 function NutritionPanel({ nutrition }: { nutrition: Nutrition }) {
   const { kcal, macros, meals_per_day, hydration_ml_per_kg, timing, meal_examples } = nutrition;
+  if (nutrition.status === "unavailable") {
+    return (
+      <EmptyPanel title="Dieta não solicitada">
+        O retorno atual não trouxe plano alimentar renderizável.
+      </EmptyPanel>
+    );
+  }
+
   return (
     <div className="stack">
       <Card title="Metas diárias" tone="accent">
         <div className="stack">
           <div className="meal-row">
             <strong>Calorias</strong>
-            <span>{kcal.min}–{kcal.max} kcal</span>
+            <span>{formatRange(kcal, "kcal")}</span>
           </div>
           <MacroRow label="Proteína" range={macros.protein_g_per_kg} unit="g/kg" />
           <MacroRow label="Carboidratos" range={macros.carbs_g_per_kg} unit="g/kg" />
           <MacroRow label="Gorduras" range={macros.fat_g_per_kg} unit="g/kg" />
           <div className="meal-row">
             <strong>Refeições/dia</strong>
-            <span>{meals_per_day.min}–{meals_per_day.max}</span>
+            <span>{formatRange(meals_per_day)}</span>
           </div>
           <div className="meal-row">
             <strong>Hidratação</strong>
-            <span>{hydration_ml_per_kg.min}–{hydration_ml_per_kg.max} ml/kg</span>
+            <span>{formatRange(hydration_ml_per_kg, "ml/kg")}</span>
           </div>
         </div>
       </Card>
@@ -586,11 +665,11 @@ function NutritionPanel({ nutrition }: { nutrition: Nutrition }) {
         <div className="stack">
           <div className="meal-row">
             <strong>Pré-treino</strong>
-            <span>{timing.pre_workout_window}</span>
+            <span>{timing.pre_workout_window ?? "A definir"}</span>
           </div>
           <div className="meal-row">
             <strong>Pós-treino</strong>
-            <span>{timing.post_workout_window}</span>
+            <span>{timing.post_workout_window ?? "A definir"}</span>
           </div>
         </div>
       </Card>
@@ -602,9 +681,13 @@ function NutritionPanel({ nutrition }: { nutrition: Nutrition }) {
               <p className="label" style={{ textTransform: "capitalize", marginBottom: 4 }}>
                 {key.replace("_", " ")}
               </p>
-              <ul className="list">
-                {items.map((item) => <li key={item}>{item}</li>)}
-              </ul>
+              {items.length > 0 ? (
+                <ul className="list">
+                  {items.map((item) => <li key={item}>{item}</li>)}
+                </ul>
+              ) : (
+                <p className="muted">A definir</p>
+              )}
             </div>
           ))}
         </div>
@@ -614,11 +697,11 @@ function NutritionPanel({ nutrition }: { nutrition: Nutrition }) {
 }
 
 function QuestionsPanel({ questions }: { questions: FollowUpQuestion[] }) {
-  const high = questions.filter((q) => q.priority === "high");
+  const visible = questions.length ? questions : [];
   return (
     <Card title="Perguntas pendentes">
       <ul className="list">
-        {high.map((q) => (
+        {visible.map((q) => (
           <li key={q.id}>{q.question}</li>
         ))}
       </ul>
@@ -671,16 +754,28 @@ function PlanPreview({ data }: { data: JourneyFitV0 }) {
 
       {tab === "training" && (
         <div className="stack">
-          <div className="hero__badges">
-            <Badge>{data.training.split}</Badge>
-            <Badge>{data.training.weekly_frequency}x/semana</Badge>
-            <Badge>
-              {data.training.session_duration_minutes.min}–{data.training.session_duration_minutes.max} min
-            </Badge>
-          </div>
-          {data.training.sessions.map((session) => (
-            <SessionCard key={session.id} session={session} />
-          ))}
+          {data.training.status === "unavailable" ? (
+            <EmptyPanel title="Treino não disponível">
+              O retorno ainda não trouxe um treino renderizável.
+            </EmptyPanel>
+          ) : (
+            <>
+              <div className="hero__badges">
+                <Badge>{data.training.split ?? "Divisão a definir"}</Badge>
+                <Badge>{data.training.weekly_frequency ? `${data.training.weekly_frequency}x/semana` : "Frequência a definir"}</Badge>
+                <Badge>{formatRange(data.training.session_duration_minutes, "min")}</Badge>
+              </div>
+              {data.training.sessions.length > 0 ? (
+                data.training.sessions.map((session) => (
+                  <SessionCard key={session.id} session={session} />
+                ))
+              ) : (
+                <EmptyPanel title="Aguardando treino detalhado">
+                  O orquestrador marcou o plano como provisório, mas ainda não enviou sessões e exercícios.
+                </EmptyPanel>
+              )}
+            </>
+          )}
         </div>
       )}
 
@@ -688,9 +783,15 @@ function PlanPreview({ data }: { data: JourneyFitV0 }) {
 
       {tab === "notices" && (
         <div className="stack">
-          {notices.map((notice, i) => (
-            <NoticeCard key={`${notice.agent}-${i}`} notice={notice} />
-          ))}
+          {notices.length > 0 ? (
+            notices.map((notice, i) => (
+              <NoticeCard key={`${notice.agent}-${i}`} notice={notice} />
+            ))
+          ) : (
+            <EmptyPanel title="Sem avisos críticos">
+              Nenhum especialista enviou restrições ou alertas para este retorno.
+            </EmptyPanel>
+          )}
           {followUpQuestions.length > 0 && (
             <QuestionsPanel questions={followUpQuestions} />
           )}
@@ -820,8 +921,8 @@ export default function App() {
           <div className="hero__eyebrow">JourneyFit preview</div>
           <h1>Converse com o orquestrador e veja o retorno virar um app.</h1>
           <p>
-            Escreva o pedido no chat, cole a resposta JSON do orquestrador e veja à direita como
-            isso aparece para o usuário final.
+            Escreva o pedido no chat. Quando o backend devolver um envelope do Hermes ou um
+            `renderable_plan`, o preview extrai o schema v0 e atualiza a tela automaticamente.
           </p>
           <div className="hero__badges">
             <Badge>mobile-first</Badge>
@@ -835,7 +936,7 @@ export default function App() {
             <section className="chat-panel">
               <div className="panel-title">
                 <h2>Chat com o orquestrador</h2>
-                <span>fase manual, futura integração automática</span>
+                <span>integração JSON dinâmica</span>
               </div>
               <div className="chat-transcript" aria-label="Conversa com o orquestrador">
                 {messages.map((message, index) => (
@@ -873,8 +974,8 @@ export default function App() {
 
             <section className="editor-panel">
               <div className="panel-title">
-                <h2>Resposta JSON do orquestrador</h2>
-                <span>copie e cole aqui por enquanto</span>
+                <h2>JSON renderizável</h2>
+                <span>autoextraído da resposta</span>
               </div>
               <textarea
                 value={jsonText}

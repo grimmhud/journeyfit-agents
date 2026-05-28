@@ -508,6 +508,25 @@ textarea::-webkit-scrollbar-thumb {
   padding: 24px;
 }
 
+.empty-panel {
+  display: grid;
+  gap: 6px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 18px;
+  padding: 16px;
+  background: rgba(148, 163, 184, 0.06);
+}
+
+.empty-panel h3,
+.empty-panel p {
+  margin: 0;
+}
+
+.empty-panel p {
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
 @media (max-width: 1024px) {
   .grid {
     grid-template-columns: 1fr;

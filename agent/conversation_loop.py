@@ -74,6 +74,29 @@ from utils import base_url_host_matches, env_var_enabled
 logger = logging.getLogger(__name__)
 
 
+def _tool_call_names(tool_calls: Any) -> set[str]:
+    names: set[str] = set()
+    for tool_call in tool_calls or []:
+        function = getattr(tool_call, "function", None)
+        name = getattr(function, "name", None)
+        if isinstance(name, str) and name:
+            names.add(name)
+            continue
+        if isinstance(tool_call, dict):
+            function_dict = tool_call.get("function")
+            if isinstance(function_dict, dict):
+                dict_name = function_dict.get("name")
+                if isinstance(dict_name, str) and dict_name:
+                    names.add(dict_name)
+    return names
+
+
+def _should_suppress_tool_call_interim_content(assistant_message: Any) -> bool:
+    return "journeyfit_orchestrate" in _tool_call_names(
+        getattr(assistant_message, "tool_calls", None)
+    )
+
+
 def _ollama_context_limit_error(agent: Any, request_tokens: int) -> Optional[str]:
     """Return a user-facing error when Ollama is loaded with too little context."""
     if not getattr(agent, "tools", None):
@@ -3071,6 +3094,10 @@ def run_conversation(
                 )
             except Exception:
                 pass
+
+            if assistant_message.content and _should_suppress_tool_call_interim_content(assistant_message):
+                logger.debug("Suppressing JourneyFit interim assistant content before tool execution")
+                assistant_message.content = ""
 
             # Handle assistant response
             if assistant_message.content and not agent.quiet_mode:

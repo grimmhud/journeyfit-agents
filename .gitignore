@@ -65,6 +65,7 @@ app.log
 .hermes/home/
 .hermes/.hermes_history
 .hermes/.clean_shutdown
+.hermes/.scratch_tip_shown
 .hermes/.update_check
 .hermes/.skills_prompt_snapshot.json
 .hermes/gateway_state.json

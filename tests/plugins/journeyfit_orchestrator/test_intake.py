@@ -20,6 +20,17 @@ def test_knee_pain_requires_medical_and_training():
     assert assessment.requires_training is True
 
 
+def test_negated_pain_does_not_require_medical_intake():
+    context = OrchestrationContext(
+        user_message="Gere um plano upper/lower 4x para homem experiente, sem dor.",
+        user_profile={},
+    )
+    assessment = IntakeAnalyzer().assess(context)
+    assert assessment.goal_type == "training_plan"
+    assert assessment.requires_medical_intake is False
+    assert assessment.requires_training is True
+
+
 def test_diabetes_diet_requires_medical_and_nutrition():
     context = OrchestrationContext(user_message="Tenho diabetes e quero emagrecer", user_profile={})
     assessment = IntakeAnalyzer().assess(context)
@@ -33,4 +44,3 @@ def test_full_weekly_routine_requires_schedule():
     assert assessment.requires_nutrition is True
     assert assessment.requires_training is True
     assert assessment.requires_scheduler is True
-

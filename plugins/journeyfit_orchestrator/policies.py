@@ -46,6 +46,22 @@ def normalize_text(text: str) -> str:
     return value.lower()
 
 
+def _without_negated_risk_terms(text: str) -> str:
+    normalized = normalize_text(text)
+    patterns = [
+        r"\bsem\s+dor(?:es)?\b",
+        r"\bsem\s+les(?:ao|oes)\b",
+        r"\bsem\s+tendinite\b",
+        r"\bsem\s+limitac(?:ao|oes)\b",
+        r"\bnao\s+tenho\s+dor(?:es)?\b",
+        r"\bnao\s+tenho\s+les(?:ao|oes)\b",
+        r"\bnao\s+sinto\s+dor(?:es)?\b",
+    ]
+    for pattern in patterns:
+        normalized = re.sub(pattern, " ", normalized)
+    return normalized
+
+
 def contains_any(text: str, terms: list[str]) -> bool:
     normalized = normalize_text(text)
     return any(normalize_text(term) in normalized for term in terms)
@@ -82,11 +98,14 @@ def missing_profile_fields(profile: dict[str, Any]) -> list[str]:
 
 
 def infer_goal_type(message: str) -> str:
-    text = normalize_text(message)
+    text = _without_negated_risk_terms(message)
     mapping = [
         ("rehab_or_pain", ["dor", "lesao", "tendinite", "reabil", "retorno ao treino", "voltar a correr"]),
         ("meal_planning", ["dieta", "aliment", "cardapio", "refeicao", "cafe da manha", "jantar", "almoco", "lanche"]),
-        ("training_plan", ["treino", "musculacao", "exercicio", "workout", "plan de treino"]),
+        (
+            "training_plan",
+            ["treino", "musculacao", "exercicio", "workout", "plano", "plano de treino", "upper/lower", "academia"],
+        ),
         ("routine_planning", ["rotina", "semana", "agenda", "dias por semana", "horarios"]),
         ("weight_loss", ["emagrec", "perder peso", "perder gordura", "secar", "cutting"]),
         ("muscle_gain", ["hipertrof", "ganhar massa", "ganhar musculo", "bulk", "crescer"]),
@@ -102,6 +121,7 @@ def infer_goal_type(message: str) -> str:
 
 def infer_requested_domains(message: str) -> list[str]:
     text = normalize_text(message)
+    risk_text = _without_negated_risk_terms(message)
     domains = []
     if any(tok in text for tok in ["dieta", "aliment", "cardapio", "refeicao", "proteina", "caloria"]):
         domains.append("nutrition")
@@ -109,7 +129,7 @@ def infer_requested_domains(message: str) -> list[str]:
         domains.append("training")
     if any(tok in text for tok in ["rotina", "semana", "agenda", "horario", "disponibilidade"]):
         domains.append("schedule")
-    if contains_any(text, MEDICAL_INTAKE_TERMS) or any(tok in text for tok in ["seguro", "medicamente", "clinicamente"]):
+    if contains_any(risk_text, MEDICAL_INTAKE_TERMS) or any(tok in risk_text for tok in ["seguro", "medicamente", "clinicamente"]):
         domains.append("medical")
     if any(tok in text for tok in ["habito", "aderencia", "consistencia", "check in", "check-in"]):
         domains.append("behavior")
@@ -119,7 +139,7 @@ def infer_requested_domains(message: str) -> list[str]:
 
 
 def infer_risk_signals(message: str, profile: dict[str, Any]) -> list[str]:
-    text = normalize_text(message)
+    text = _without_negated_risk_terms(message)
     signals: list[str] = []
     if contains_any(text, MEDICAL_INTAKE_TERMS):
         signals.append("medical_keyword")
